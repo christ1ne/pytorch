@@ -3839,7 +3839,10 @@ def fn():
         else:
             self.assertTrue(guard_failure is not None)
             if not torch._dynamo.config.dynamic_shapes:
-                self.assertExpectedInline(guard_failure[0], """L['k'] == 3""")
+                self.assertExpectedInline(
+                    guard_failure[0],
+                    """L['k'] == 3""",
+                )
 
     @patch.object(torch._dynamo.config, "dynamic_shapes", True)
     def test_guard_failure_fn_shape_control(self):
@@ -3945,7 +3948,10 @@ def fn():
 
         # guard is expected for both static and dynamic shapes
         self.assertTrue(guard_failure is not None)
-        self.assertExpectedInline(guard_failure[0], """len(L['x']) == 10""")
+        self.assertExpectedInline(
+            guard_failure[0],
+            """len(L['x']) == 10""",
+        )
 
     def test_restore_graphstate(self):
         # This function does some guard accumulation,
@@ -4818,7 +4824,7 @@ def fn():
             base_checker().check("Recompile Reasons").check("'forward'").check(
                 "tensor 'L['input']' size mismatch at index 0. expected 2, actual 3"
             ).check(
-                "tensor 'L['input']' size mismatch at index 0. expected 3, actual 4"
+                "tensor 'L['input']' size mismatch at index 0. expected 2, actual 4"
             ).run(
                 prof.report()
             )
