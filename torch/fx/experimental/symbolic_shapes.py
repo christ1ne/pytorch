@@ -12,7 +12,7 @@ import traceback
 from dataclasses import dataclass
 from contextlib import contextmanager
 from functools import lru_cache
-from typing import cast, Dict, List, Optional, Set, Type, Union
+from typing import cast, Dict, List, Optional, Set, Type, Union, Tuple
 from enum import Enum
 
 import torch
@@ -1331,11 +1331,13 @@ class ShapeGuardPrinter(StrPrinter):
         symbol_to_source,
         source_ref,
         var_to_sources,
+        sources,
     ):
         super().__init__()
         self.symbol_to_source = symbol_to_source
         self.source_ref = source_ref
         self.var_to_sources = var_to_sources
+        self.sources = sources
 
     def _print_Symbol(self, expr) -> str:
         assert isinstance(expr, sympy.Symbol), str(type(expr))
@@ -1351,7 +1353,9 @@ class ShapeGuardPrinter(StrPrinter):
             f"not in {repr_symbol_to_source()}.  If this assert is failing, it could be "
             "due to the issue described in https://github.com/pytorch/pytorch/pull/90665"
         )
-        return self.source_ref(self.symbol_to_source[expr][0])
+        source = self.symbol_to_source[expr][0]
+        self.sources.append(source)
+        return self.source_ref(source)
 
 
 class LoggingShapeGuardPrinter(ShapeGuardPrinter):
@@ -1468,14 +1472,17 @@ class ShapeEnv:
         # Reimplement the legacy behavior
         if constraint_dims is None:
             constraint_dims = [None] * dim
+        breakpoint()
         if dynamic_dims is None:
             dynamic_dims = []
             for i in range(dim):
+                breakpoint()
                 # NB: This is encapsulation breaking!  Legacy behavior was
                 # bad.
                 if _is_dim_dynamic(ex, i):
                     r = DimDynamic.DYNAMIC
                 elif self.assume_static_by_default:
+                    breakpoint()
                     r = DimDynamic.STATIC
                 else:
                     r = DimDynamic.DUCK
@@ -1658,9 +1665,11 @@ class ShapeEnv:
         # just means there are no constraints
         constraint_inputs: Optional[InputList[Union[DimConstraint, Optional[DimList[DimConstraint]]]]] = None,
         _simplified=False
-    ) -> List[str]:
+    ) -> Tuple[List[str], List[Source]]:
+
         assert len(placeholders) == len(sources)
 
+        guard_sources = []
         # Expand optional inputs, or verify invariants are upheld
         if constraint_inputs is None:
             constraint_inputs = [
@@ -1789,6 +1798,7 @@ class ShapeEnv:
                             else:
                                 return "Did you really mean to mark this dimension as dynamic?"
 
+                        breakpoint()
                         record_constraint_violation(lambda: (
                             f"Could not validate constraint {constraint.render(source)} as "
                             f"{source.name()} is actually a non-atomic symbolic expression "
@@ -1839,7 +1849,8 @@ class ShapeEnv:
                     source == symbol_to_source[expr][0]
                 ):
                     continue
-                sexpr = ShapeGuardPrinter(symbol_to_source, source_ref, self.var_to_sources).doprint(expr)
+                sexpr = ShapeGuardPrinter(symbol_to_source, source_ref, self.var_to_sources, []).doprint(expr)
+                guard_sources.append(source)
                 exprs.append(f"{source_ref(source)} == {sexpr}")
                 # NB: Not necessary to report constraint violations here:
                 # constraints are guaranteed to be on symbols (we've already
@@ -1854,7 +1865,7 @@ class ShapeEnv:
                 continue
             g = self.simplify(g)
             try:
-                guard_expr = ShapeGuardPrinter(symbol_to_source, source_ref, self.var_to_sources).doprint(g)
+                guard_expr = ShapeGuardPrinter(symbol_to_source, source_ref, self.var_to_sources, guard_sources).doprint(g)
                 exprs.append(guard_expr)
                 # A non-relational constraint on a single sizevar can violate
                 # a constraint
@@ -1926,13 +1937,17 @@ class ShapeEnv:
                 if r.upper != sympy.oo and r.upper < sys.maxsize - 1:
                     bounds.append(str(r.upper))
                 if len(bounds) > 1:
+                    guard_sources.append(sources[0])
                     exprs.append(" <= ".join(bounds))
 
+        breakpoint()
         if constraint_violations:
             msgs = [f"  {i + 1}. {msg()}" for i, msg in enumerate(constraint_violations)]
             msgs = "\n".join(msgs)
             raise ConstraintViolationError(f"Constraints violated!\n{msgs}")
-        return exprs
+        
+        assert len(exprs) == len(guard_sources), breakpoint()
+        return (exprs, guard_sources)
 
     def evaluate_guards_for_args(self, placeholders, args):
         from torch._dynamo.source import LocalSource

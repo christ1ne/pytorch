@@ -359,6 +359,34 @@ def first_real_inst_idx(code):
     raise RuntimeError("RESUME instruction not found in code")
 
 
+# Converts a CodePart structure, which carries our
+# re-compilation code, source, and more, into a
+# plan for how to mark certain dims as dynamic.
+def dynamic_plan_from_code_part(code_part: Optional[CodePart], dynamic_plan):
+    from torch._dynamo.source import TensorPropertySource, TensorProperty
+    
+    if code_part is None:
+        return None
+
+    if dynamic_plan is None:
+        dynamic_plan = {}
+        
+    if code_part.origin == "SHAPE_ENV":
+        source = code_part.source
+        # TODO: Expand to stride?
+        if isinstance(source, TensorPropertySource):
+            prop = source.prop
+            if prop == TensorProperty.SIZE:
+                inner_source = source.base
+                name = inner_source.local_name
+                if name not in dynamic_plan:
+                    dynamic_plan[name] = []
+                dynamic_plan[name].append(source.idx)
+    return dynamic_plan
+    # if not config.dynamic_shapes or not code_part:
+    # return None
+
+
 def catch_errors_wrapper(callback, hooks: Hooks):
     @functools.wraps(callback)
     def catch_errors(frame, cache_size, code_part):
@@ -369,6 +397,8 @@ def catch_errors_wrapper(callback, hooks: Hooks):
             )
             msg += f" Due to guard failure {code_part.code} from guard {code_part.origin} and source {code_part.source}"
         log.debug(msg)
+        dynamic_plan = None
+        dynamic_plan = dynamic_plan_from_code_part(code_part, dynamic_plan)
         if (
             # TODO: the first condition is not covered by any test
             frame.f_lasti >= first_real_inst_idx(frame.f_code)
@@ -394,10 +424,10 @@ def catch_errors_wrapper(callback, hooks: Hooks):
                         ddp_optimizer.compile_fn,
                         hooks=hooks,
                     )
-                    return hijacked_callback(frame, cache_size, hooks)
+                    return hijacked_callback(frame, cache_size, hooks, dynamic_plan)
 
         with compile_lock:
-            return callback(frame, cache_size, hooks)
+            return callback(frame, cache_size, hooks, dynamic_plan)
 
     catch_errors._torchdynamo_orig_callable = callback  # type: ignore[attr-defined]
     return catch_errors
