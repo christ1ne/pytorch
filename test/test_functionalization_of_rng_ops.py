@@ -21,7 +21,7 @@ def count_philox_rand(gm, args, freq):
 class TestFunctionalizationRngOps(TestCase):
     @dtypes(torch.float32)
     @patch.object(torch._functorch.config, "functionalize_rng_ops", True)
-    def test_forward(self, dtype, device):
+    def test_rand_like(self, dtype, device):
         def fn(x):
             a = torch.rand_like(x) * x
             a = torch.rand_like(x) * a
@@ -39,6 +39,26 @@ class TestFunctionalizationRngOps(TestCase):
 
             self.assertEqual(ref, res)
 
+    @dtypes(torch.float32)
+    @patch.object(torch._functorch.config, "functionalize_rng_ops", True)
+    def test_rand(self, dtype, device):
+        shape = (10,)
+        def fn(x):
+            a = torch.rand(*shape, device=device, dtype=dtype) * x
+            a = torch.rand(*shape, device=device, dtype=dtype) * a
+            return a
+
+        x = torch.rand(*shape, device=device, dtype=dtype)
+
+        for seed in range(10):
+            torch.cuda.manual_seed(seed)
+            ref = fn(x)
+
+            torch.cuda.manual_seed(seed)
+            aot_fn = aot_function(fn, functools.partial(count_philox_rand, freq=2))
+            res = aot_fn(x)
+
+            self.assertEqual(ref, res)
 
     @dtypes(torch.float32)
     @patch.object(torch._functorch.config, "functionalize_rng_ops", True)
@@ -77,6 +97,74 @@ class TestFunctionalizationRngOps(TestCase):
 
         self.assertEqual(ref, res)
         self.assertEqual(x.grad, x_clone.grad)
+
+    @dtypes(torch.float32)
+    @patch.object(torch._functorch.config, "functionalize_rng_ops", True)
+    def test_multiple_subgraphs(self, dtype, device):
+        shape = (16, 16)
+
+        class CustomOp1(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x):
+                ctx.save_for_backward(x)
+                a = torch.rand_like(x) * x
+                a = torch.rand_like(x) * a
+                return a
+
+            @staticmethod
+            def backward(ctx, grad_out):
+                x, = ctx.saved_tensors
+                return grad_out * torch.rand_like(grad_out) * torch.cos(x)
+
+        class CustomOp2(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x):
+                ctx.save_for_backward(x)
+                a = torch.rand_like(x) * x
+                return a
+
+            @staticmethod
+            def backward(ctx, grad_out):
+                x, = ctx.saved_tensors
+                return grad_out * torch.rand_like(grad_out) * torch.rand_like(x)
+
+
+        custom_op1 = CustomOp1.apply
+        custom_op2 = CustomOp2.apply
+
+        def fn(x):
+            a = custom_op1(x)
+            b = a.sin()
+            return custom_op2(b)
+
+        fwd_compiler = functools.partial(count_philox_rand, freq=2)
+        bwd_compiler = functools.partial(count_philox_rand, freq=1)
+        aot_custom_op1 = aot_function(custom_op1, fwd_compiler, bwd_compiler)
+        fwd_compiler = functools.partial(count_philox_rand, freq=1)
+        bwd_compiler = functools.partial(count_philox_rand, freq=2)
+        aot_custom_op2 = aot_function(custom_op2, fwd_compiler, bwd_compiler)
+ 
+        def aot_fn(x):
+            a = aot_custom_op1(x)
+            b = a.sin()
+            return aot_custom_op2(b)
+
+
+        for seed in range(10):
+            torch.cuda.manual_seed(seed)
+            x = torch.rand(*shape, device=device, dtype=dtype, requires_grad=True)
+            x_clone = x.clone().detach().requires_grad_(True)
+
+            torch.cuda.manual_seed(seed)
+            ref = fn(x)
+            ref.sum().backward()
+
+            torch.cuda.manual_seed(seed)
+            res = aot_fn(x_clone)
+            res.sum().backward()
+
+            self.assertEqual(ref, res)
+            self.assertEqual(x.grad, x_clone.grad)
 
     @dtypes(torch.float32)
     @patch.object(torch._functorch.config, "functionalize_rng_ops", True)
